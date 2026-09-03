@@ -1,33 +1,52 @@
-name: Mirror Apps to Google Drive
+name: Mirror Apps to Google Drive and GitHub Repository
 
 on:
   workflow_dispatch:
+    # Run manually from the GitHub Actions page.
 
 permissions:
   contents: write
+  # Allow the workflow to commit and push files back to this repository.
+
+concurrency:
+  group: mirror-apps
+  cancel-in-progress: false
+  # Prevent two mirror runs from pushing at the same time.
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    # Use a temporary GitHub-hosted Linux server.
+    # Downloads happen on GitHub servers, not on your Mac.
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: false
+        # Download repository files such as sources.csv and workflow files.
+        # Do not download existing LFS binaries during checkout.
 
       - name: Install rclone
         run: |
+          # Install rclone for Google Drive upload.
           curl -fsSL https://rclone.org/install.sh | sudo bash
 
-      - name: Restore private rclone config
+      - name: Restore Google Drive configuration
         env:
           RCLONE_CONFIG_B64: ${{ secrets.RCLONE_CONFIG_B64 }}
         run: |
+          # Restore rclone.conf from the private GitHub Secret.
           mkdir -p ~/.config/rclone
           printf '%s' "$RCLONE_CONFIG_B64" | base64 --decode > ~/.config/rclone/rclone.conf
           chmod 600 ~/.config/rclone/rclone.conf
 
-      - name: Mirror all files to Google Drive
+      - name: Download official files directly to Google Drive
         run: |
+          # Read all URL,path rows from sources.csv.
+          # Download every source URL directly to Google Drive.
+          # Existing files with the same Drive path will not be overwritten.
           rclone copyurl \
             --urls sources.csv \
             gdrive: \
@@ -36,27 +55,98 @@ jobs:
             --low-level-retries 10 \
             --stats-one-line
 
-      - name: Create mirror manifest
+      - name: Configure Git LFS
         run: |
+          # Initialize Git Large File Storage for binary application files.
+          git lfs install --local
+
+          # Store these binary extensions in Git LFS, not normal Git history.
+          git lfs track "*.apk"
+          git lfs track "*.exe"
+          git lfs track "*.pkg"
+          git lfs track "*.zip"
+          git lfs track "*.dmg"
+          git lfs track "*.msi"
+          git lfs track "*.deb"
+          git lfs track "*.rpm"
+
+          # Show active LFS rules for verification.
+          cat .gitattributes
+
+      - name: Download official files directly to repository
+        shell: bash
+        run: |
+          # Create the repository download directory.
+          mkdir -p downloads
+
+          # Read the same source list again.
+          # Each new file is downloaded directly from its official URL.
+          # Google Drive is NOT used as a source in this step.
+          while IFS=, read -r url path; do
+            # Skip empty lines.
+            [ -z "$url" ] && continue
+
+            # Remove Windows carriage return if sources.csv was edited on Windows.
+            path="${path//$'\r'/}"
+
+            # Build local destination path inside this repository.
+            destination="downloads/$path"
+
+            # Skip files that already exist in Git history.
+            # Use a new versioned filename for every new app release.
+            if git ls-files --error-unmatch "$destination" >/dev/null 2>&1; then
+              echo "Already tracked in repository: $destination"
+              continue
+            fi
+
+            # Create folders such as downloads/android, downloads/mac, downloads/windows.
+            mkdir -p "$(dirname "$destination")"
+
+            # Download directly from the official URL to the GitHub runner.
+            curl \
+              --fail \
+              --location \
+              --retry 5 \
+              --retry-all-errors \
+              --output "$destination" \
+              "$url"
+
+            # Show downloaded file details.
+            ls -lh "$destination"
+          done < sources.csv
+
+      - name: Create download manifest
+        shell: bash
+        run: |
+          # Generate a human-readable file list in the repository.
           {
             echo "# Tailscale Apps Mirror"
             echo
-            echo "Last GitHub Action run: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "Last successful run: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             echo
-            echo "## Sources"
+            echo "## Official sources"
             echo
-            echo "| Platform | Google Drive path | Official source |"
+            echo "| Platform | Repository path | Official source |"
             echo "|---|---|---|"
             while IFS=, read -r url path; do
+              [ -z "$url" ] && continue
+              path="${path//$'\r'/}"
               platform="${path%%/*}"
-              echo "| ${platform} | \`${path}\` | ${url} |"
+              echo "| ${platform} | \`downloads/${path}\` | ${url} |"
             done < sources.csv
           } > mirror-manifest.md
 
-      - name: Save manifest to repository
+      - name: Commit and push files to repository
         run: |
+          # Configure the commit author as GitHub Actions bot.
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add mirror-manifest.md
-          git diff --cached --quiet || git commit -m "Update mirror manifest"
+
+          # Add Git LFS rules, downloaded files, and the source manifest.
+          git add .gitattributes downloads mirror-manifest.md
+
+          # Create a commit only when there are actual changes.
+          git diff --cached --quiet || git commit -m "Mirror app downloads"
+
+          # Push the commit and Git LFS objects to the current branch.
           git push
