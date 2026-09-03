@@ -1,16 +1,19 @@
-name: Mirror Tailscale APK to Google Drive
+name: Mirror Apps to Google Drive
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install rclone
         run: |
           curl -fsSL https://rclone.org/install.sh | sudo bash
@@ -23,18 +26,37 @@ jobs:
           printf '%s' "$RCLONE_CONFIG_B64" | base64 --decode > ~/.config/rclone/rclone.conf
           chmod 600 ~/.config/rclone/rclone.conf
 
-      - name: Download official Tailscale APK and upload to Drive
+      - name: Mirror all files to Google Drive
         run: |
           rclone copyurl \
-            "https://pkgs.tailscale.com/stable/tailscale-android-universal-1.102.3.apk" \
+            --urls sources.csv \
             gdrive: \
-            --auto-filename \
-            --header-filename \
             --no-clobber \
             --retries 5 \
             --low-level-retries 10 \
             --stats-one-line
 
-      - name: Verify uploaded APK
+      - name: Create mirror manifest
         run: |
-          rclone lsl gdrive:
+          {
+            echo "# Tailscale Apps Mirror"
+            echo
+            echo "Last GitHub Action run: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo
+            echo "## Sources"
+            echo
+            echo "| Platform | Google Drive path | Official source |"
+            echo "|---|---|---|"
+            while IFS=, read -r url path; do
+              platform="${path%%/*}"
+              echo "| ${platform} | \`${path}\` | ${url} |"
+            done < sources.csv
+          } > mirror-manifest.md
+
+      - name: Save manifest to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mirror-manifest.md
+          git diff --cached --quiet || git commit -m "Update mirror manifest"
+          git push
