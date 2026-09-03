@@ -43,17 +43,30 @@ jobs:
           chmod 600 ~/.config/rclone/rclone.conf
 
       - name: Download official files directly to Google Drive
+        shell: bash
         run: |
-          # Read all URL,path rows from sources.csv.
-          # Download every source URL directly to Google Drive.
-          # Existing files with the same Drive path will not be overwritten.
-          rclone copyurl \
-            --urls sources.csv \
-            gdrive: \
-            --no-clobber \
-            --retries 5 \
-            --low-level-retries 10 \
-            --stats-one-line
+          # Read each URL and destination path from sources.csv.
+          while IFS=, read -r url path; do
+            # Skip empty rows.
+            [ -z "$url" ] && continue
+
+            # Remove Windows carriage return if present.
+            path="${path//$'\r'/}"
+
+            # Skip the upload if this exact file already exists in Google Drive.
+            if rclone lsjson --stat "gdrive:$path" >/dev/null 2>&1; then
+              echo "Already exists in Google Drive: $path"
+              continue
+            fi
+
+            # Download the official URL directly to Google Drive.
+            rclone copyurl \
+              "$url" \
+              "gdrive:$path" \
+              --retries 5 \
+              --low-level-retries 10 \
+              --stats-one-line
+          done < sources.csv
 
       - name: Configure Git LFS
         run: |
